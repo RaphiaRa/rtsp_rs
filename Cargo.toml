@@ -1,0 +1,15 @@
+[package]
+name = "mm_streamer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4.22"
+ringbuf = "0.4.7"
+rustls = "0.23.19"
+rustls-pki-types = "1.10.0"
+thiserror = "2.0.7"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26.1"
+tokio-test = "0.4.4"
+url = "2.5.4"
