@@ -1,5 +1,6 @@
 use super::{Header, SenderReport};
 use std::io;
+
 pub struct Packet<'a> {
     pub buf: &'a [u8],
 }

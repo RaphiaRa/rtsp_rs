@@ -1,9 +1,7 @@
-use url::form_urlencoded::Parse;
-
 use super::*;
 use std::iter::Iterator;
-use std::{collections::HashMap, fmt::Error};
 use thiserror::Error;
+use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
 enum State {
@@ -14,7 +12,7 @@ enum State {
     Done,
 }
 
-pub struct Parser {
+pub struct ResponseParser {
     state: State,
     pos: usize,
     header_length: usize,
@@ -23,10 +21,10 @@ pub struct Parser {
 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("Missing end of line")]
-    MissingEndOfLine,
-    #[error("Missing space")]
-    MissingSpace,
+    #[error("Expected end of line")]
+    ExpectedEndOfLine,
+    #[error("Expected space")]
+    ExpectedSpace,
     #[error(transparent)]
     ParseHeader(#[from] ParseHeaderError),
     #[error(transparent)]
@@ -37,8 +35,11 @@ pub enum ParseError {
     ParseStatus(#[from] ParseStatusError),
     #[error("Failed to parse content length")]
     ParseContentLength(#[from] std::num::ParseIntError),
+    #[error(transparent)]
+    Encoding(#[from] std::str::Utf8Error),
 }
 
+#[derive(Debug)]
 pub enum ParseItem<'a> {
     Protocol(Protocol),
     Status(Status),
@@ -64,9 +65,20 @@ impl<'a> From<Header<'a>> for ParseItem<'a> {
     }
 }
 
+impl <'a> fmt::Display for ParseItem<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ParseItem::Protocol(p) => write!(f, "{}", p),
+            ParseItem::Status(s) => write!(f, "{}", s),
+            ParseItem::Header(h) => write!(f, "{}", h),
+            ParseItem::Body(b) => write!(f, "{}", b),
+        }
+    }
+}
+
 type Result<T> = std::result::Result<T, ParseError>;
 
-impl Parser {
+impl ResponseParser {
     pub fn new() -> Self {
         Self {
             state: State::ExpectProtocol,
@@ -76,41 +88,54 @@ impl Parser {
         }
     }
 
-    fn get_next_line<'a>(&mut self, data: &'a str) -> Result<&'a str> {
+    fn get_next_line<'a>(&mut self, data: &'a [u8]) -> Result<&'a str> {
         let data = &data[self.pos..];
-        let line = data.split("\r\n").next().ok_or(ParseError::MissingEndOfLine)?;
-        self.pos += line.len() + 2;
-        Ok(line)
-    }
-
-    fn get_next_token<'a>(&mut self, data: &'a str) -> Result<&'a str> {
-        let data = &data[self.pos..];
-        let line = data.split("\r\n").next().ok_or(ParseError::MissingEndOfLine)?;
-        let token = line.split_whitespace().next().ok_or(ParseError::MissingSpace)?;
-        self.pos += token.len();
-        if line.len() > token.len() {
-            self.pos += 1; // consume the space
+        for (i, w) in data.windows(2).enumerate() {
+            if w == b"\r\n" {
+                let line = std::str::from_utf8(&data[..i])?;
+                self.pos += i + 2;
+                return Ok(line);
+            }
         }
-        Ok(token)
+        Err(ParseError::ExpectedEndOfLine)
     }
 
-    fn discard_line(&mut self, data: &str) {
+    fn get_next_token<'a>(&mut self, data: &'a [u8]) -> Result<&'a str> {
         let data = &data[self.pos..];
-        let line = data.split("\r\n").next().unwrap();
-        self.pos += line.len() + 2;
+        for (i, w) in data.windows(2).enumerate() {
+            if w[0] == b' ' {
+                let line = std::str::from_utf8(&data[..i])?;
+                self.pos += i + 1;
+                return Ok(line);
+            } else if w == b"\r\n" {
+                return Err(ParseError::ExpectedSpace);
+            }
+        }
+        Err(ParseError::ExpectedSpace)
     }
 
-    fn parse_protocol<'a>(&mut self, data: &'a str) -> Result<Option<ParseItem<'a>>> {
+    fn discard_line(&mut self, data: &[u8]) -> Result<()> {
+        let data = &data[self.pos..];
+        for (i, w) in data.windows(2).enumerate() {
+            if w == b"\r\n" {
+                self.pos += i + 2;
+                return Ok(());
+            }
+        }
+        Err(ParseError::ExpectedEndOfLine)
+    }
+
+    fn parse_protocol<'a>(&mut self, data: &'a [u8]) -> Result<Option<ParseItem<'a>>> {
         let token = self.get_next_token(data)?;
         let protcol: Protocol = token.parse()?;
         self.state = State::ExpectStatus;
         Ok(Some(protcol.into()))
     }
 
-    fn parse_status<'a>(&mut self, data: &'a str) -> Result<Option<ParseItem<'a>>> {
+    fn parse_status<'a>(&mut self, data: &'a [u8]) -> Result<Option<ParseItem<'a>>> {
         let token = self.get_next_token(data)?;
         let status: Status = token.parse()?;
-        self.discard_line(data);
+        self.discard_line(data)?;
         self.state = State::ExpectHeader;
         Ok(Some(status.into()))
     }
@@ -122,7 +147,7 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_header_field<'a>(&mut self, data: &'a str) -> Result<Option<ParseItem<'a>>> {
+    fn parse_header_field<'a>(&mut self, data: &'a [u8]) -> Result<Option<ParseItem<'a>>> {
         let line = self.get_next_line(data)?;
         if line.is_empty() {
             if self.content_length > 0 {
@@ -139,18 +164,20 @@ impl Parser {
         }
     }
 
-    fn parse_body<'a>(&mut self, data: &'a str) -> Result<Option<ParseItem<'a>>> {
+    fn parse_body<'a>(&mut self, data: &'a [u8]) -> Result<Option<ParseItem<'a>>> {
         let data = &data[self.pos..];
         if data.len() >= self.content_length {
             self.pos += self.content_length;
             self.state = State::Done;
-            Ok(Some(ParseItem::Body(&data[..self.content_length])))
+            Ok(Some(ParseItem::Body(std::str::from_utf8(
+                &data[..self.content_length],
+            )?)))
         } else {
             Ok(None)
         }
     }
 
-    pub fn parse_next<'a>(&mut self, data: &'a str) -> Result<Option<ParseItem<'a>>> {
+    pub fn parse_next<'a>(&mut self, data: &'a [u8]) -> Result<Option<ParseItem<'a>>> {
         match self.state {
             State::ExpectProtocol => self.parse_protocol(data),
             State::ExpectStatus => self.parse_status(data),
@@ -191,10 +218,10 @@ mod tests {
 
     #[test]
     fn test_parse_simple_response() {
-        let mut parser = Parser::new();
-        let response = "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n".to_string();
+        let mut parser = ResponseParser::new();
+        let response = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n";
         loop {
-            match parser.parse_next(&response).unwrap() {
+            match parser.parse_next(response).unwrap() {
                 Some(ParseItem::Protocol(p)) => assert_eq!(p, Protocol::new(Version::new(1, 0))),
                 Some(ParseItem::Status(s)) => assert_eq!(s, Status::OK),
                 Some(ParseItem::Header(h)) => assert_eq!(h, Header::new("CSeq", "1")),
@@ -207,10 +234,10 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_body() {
-        let mut parser = Parser::new();
-        let response = "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 5\r\n\r\nhello".to_string();
+        let mut parser = ResponseParser::new();
+        let response = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 5\r\n\r\nhello";
         loop {
-            match parser.parse_next(&response).unwrap() {
+            match parser.parse_next(response).unwrap() {
                 Some(ParseItem::Protocol(p)) => assert_eq!(p, Protocol::new(Version::new(1, 0))),
                 Some(ParseItem::Status(s)) => assert_eq!(s, Status::OK),
                 Some(ParseItem::Header(h)) => match h.name {
@@ -227,9 +254,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_incomplete_body() {
-        let mut parser = Parser::new();
-        let response = "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 11\r\n\r\nhello".to_string();
-        while let Some(item) = parser.parse_next(&response).unwrap() {
+        let mut parser = ResponseParser::new();
+        let response = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 11\r\n\r\nhello";
+        while let Some(item) = parser.parse_next(response).unwrap() {
             match item {
                 ParseItem::Protocol(p) => assert_eq!(p, Protocol::new(Version::new(1, 0))),
                 ParseItem::Status(s) => assert_eq!(s, Status::OK),
@@ -242,8 +269,8 @@ mod tests {
             }
         }
         assert_eq!(parser.is_done(), false);
-        let response = "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 11\r\n\r\nhello world".to_string();
-        while let Some(item) = parser.parse_next(&response).unwrap() {
+        let response = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 11\r\n\r\nhello world";
+        while let Some(item) = parser.parse_next(response).unwrap() {
             match item {
                 ParseItem::Body(b) => assert_eq!(b, "hello world"),
                 _ => panic!("Unexpected item"),

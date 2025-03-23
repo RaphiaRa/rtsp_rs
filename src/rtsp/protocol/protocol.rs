@@ -1,40 +1,8 @@
 use std::fmt;
-use std::num::ParseIntError;
 use std::str::FromStr;
 use thiserror::Error;
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Version(u8, u8);
-
-impl Version {
-    pub fn new(major: u8, minor: u8) -> Self {
-        Version(major, minor)
-    }
-}
-
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}.{}", self.0, self.1)
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum ParseVersionError {
-    #[error("Failed to parse version digits")]
-    ParseInt(#[from] ParseIntError),
-    #[error("Invalid version format")]
-    Format(#[from] fmt::Error),
-}
-
-impl FromStr for Version {
-    type Err = ParseVersionError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut iter = s.split('.');
-        let major = iter.next().ok_or(fmt::Error)?.parse::<u8>()?;
-        let minor = iter.next().ok_or(fmt::Error)?.parse::<u8>()?;
-        Ok(Version(major, minor))
-    }
-}
+use super::{ParseVersionError, Version};
 
 #[derive(Debug, PartialEq)]
 pub struct Protocol {
