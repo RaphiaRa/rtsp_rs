@@ -16,15 +16,17 @@ pub enum Error {
     BadResponse,
 }
 
-type PreparedBuilder<H> = RequestBuilder<H, VoidBody>;
-type Result<T> = std::result::Result<T, Error>;
+type PreparedBuilder<H> = RequestBuilder<VoidUrl, H, VoidBody>;
+
+pub type Result<T> = std::result::Result<T, Error>;
 pub struct Describe {
+    url: url::Url,
     tx: oneshot::Sender<Result<sdp::Sdp>>,
 }
 
 impl Describe {
-    pub fn write(&self, builder: PreparedBuilder<impl RequestWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
-        Ok(builder.method(Method::Describe).write(buf)?)
+    pub fn write(&self, builder: PreparedBuilder<impl CompositeWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(builder.method(Method::Describe).url(&self.url).write(buf)?)
     }
 
     pub fn handle_response(self, status: Status, _headers: &[Header], body: &str) {
@@ -44,8 +46,8 @@ impl Describe {
 }
 
 impl Describe {
-    pub fn new(tx: oneshot::Sender<Result<sdp::Sdp>>) -> Self {
-        Self { tx }
+    pub fn new(url: url::Url, tx: oneshot::Sender<Result<sdp::Sdp>>) -> Self {
+        Self { url, tx }
     }
 }
 
@@ -54,7 +56,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn write(&self, builder: PreparedBuilder<impl RequestWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub fn write(&self, builder: PreparedBuilder<impl CompositeWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Command::Describe(describe) => describe.write(builder, buf),
         }

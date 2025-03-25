@@ -8,13 +8,13 @@ pub type BuildError = std::io::Error;
 pub type Result<T> = std::result::Result<T, BuildError>;
 
 pub trait RequestWriter {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize>;
+    fn write(&self, buf: &mut [u8]) -> Result<usize>;
 }
 
 pub struct VoidHeader {}
 
 impl RequestWriter for VoidHeader {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
         write!(&mut buf[..], "\r\n")?;
         Ok(2)
     }
@@ -26,7 +26,7 @@ pub struct HeaderWriter<'a, V> {
 }
 
 impl<V: fmt::Display> RequestWriter for HeaderWriter<'_, V> {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
         let mut cursor = std::io::Cursor::new(buf);
         write!(cursor, "{}: {}\r\n", self.name, self.value)?;
         Ok(cursor.position() as usize)
@@ -38,69 +38,80 @@ pub struct Composite<A, B> {
     b: B,
 }
 
-trait CompositeWriter {
-    fn write_composite(&mut self, buf: &mut [u8]) -> Result<usize>;
+pub trait CompositeWriter {
+    fn write_composite(&self, buf: &mut [u8]) -> Result<usize>;
 }
 
 impl<B: RequestWriter> CompositeWriter for Composite<VoidHeader, B> {
-    fn write_composite(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write_composite(&self, buf: &mut [u8]) -> Result<usize> {
         // ignore void header
         Ok(self.b.write(&mut buf[..])?)
     }
 }
 
 impl<A: CompositeWriter, B: RequestWriter> CompositeWriter for Composite<A, B> {
-    fn write_composite(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write_composite(&self, buf: &mut [u8]) -> Result<usize> {
         let pos = self.a.write_composite(buf)?;
         Ok(pos + self.b.write(&mut buf[pos..])?)
     }
 }
 
 impl<A: CompositeWriter, B: RequestWriter> RequestWriter for Composite<A, B> {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
         let pos = self.write_composite(buf)?;
         Ok(pos + VoidHeader {}.write(&mut buf[pos..])?)
-    }
-}
-
-impl<B: RequestWriter> RequestWriter for Composite<VoidHeader, B> {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let pos = self.b.write(&mut buf[..])?;
-        Ok(pos + self.a.write(&mut buf[pos..])?)
     }
 }
 
 pub struct VoidBody {}
 
 impl RequestWriter for VoidBody {
-    fn write(&mut self, _buf: &mut [u8]) -> Result<usize> {
+    fn write(&self, _buf: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
 }
-
-struct BodyWriter<B> {
+pub struct BodyWriter<B> {
     body: B,
 }
 
 impl<B: fmt::Display> RequestWriter for BodyWriter<B> {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
         let mut cursor = std::io::Cursor::new(buf);
         write!(cursor, "{}", self.body)?;
         Ok(cursor.position() as usize)
     }
 }
 
+pub struct VoidUrl {}
+
+impl fmt::Display for VoidUrl {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "rtsp://")
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct RequestBuilder<H, B> {
+pub struct RequestBuilder<U, H, B> {
     method: Method,
-    url: Url,
     version: Version,
+    url: U,
     headers: H,
     body: B,
 }
 
-impl<H: RequestWriter, B: RequestWriter> RequestWriter for RequestBuilder<H, B> {
-    fn write(&mut self, buf: &mut [u8]) -> Result<usize> {
+impl<U: fmt::Display, H: CompositeWriter, B: RequestWriter> RequestWriter for RequestBuilder<U, H, B> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
+        let mut cursor = std::io::Cursor::new(buf);
+        write!(cursor, "{} {} RTSP/{}\r\n", self.method, self.url, self.version)?;
+        let mut pos = cursor.position() as usize;
+        pos += self.headers.write_composite(&mut cursor.get_mut()[pos..])?;
+        pos += self.body.write(&mut cursor.get_mut()[pos..])?;
+        Ok(pos)
+    }
+}
+
+impl<U: fmt::Display, B: RequestWriter> RequestWriter for RequestBuilder<U, VoidHeader, B> {
+    fn write(&self, buf: &mut [u8]) -> Result<usize> {
         let mut cursor = std::io::Cursor::new(buf);
         write!(cursor, "{} {} RTSP/{}\r\n", self.method, self.url, self.version)?;
         let mut pos = cursor.position() as usize;
@@ -110,11 +121,11 @@ impl<H: RequestWriter, B: RequestWriter> RequestWriter for RequestBuilder<H, B> 
     }
 }
 
-impl RequestBuilder<VoidHeader, VoidBody> {
-    pub fn new(url: Url) -> Self {
+impl RequestBuilder<VoidUrl, VoidHeader, VoidBody> {
+    pub fn new() -> Self {
         Self {
             method: Method::Options,
-            url: url,
+            url: VoidUrl {},
             version: Version::new(1, 0),
             headers: VoidHeader {},
             body: VoidBody {},
@@ -122,7 +133,7 @@ impl RequestBuilder<VoidHeader, VoidBody> {
     }
 }
 
-impl<H, B> RequestBuilder<H, B> {
+impl<U, H, B> RequestBuilder<U, H, B> {
     pub fn version(self, version: Version) -> Self {
         Self { version, ..self }
     }
@@ -132,12 +143,42 @@ impl<H, B> RequestBuilder<H, B> {
     }
 }
 
-impl<H: RequestWriter> RequestBuilder<H, VoidBody> {
+impl<H, B> RequestBuilder<VoidUrl, H, B> {
+    pub fn url<'a>(self, url: &'a Url) -> RequestBuilder<&'a Url, H, B> {
+        RequestBuilder {
+            method: self.method,
+            url,
+            version: self.version,
+            headers: self.headers,
+            body: self.body,
+        }
+    }
+}
+
+impl<U> RequestBuilder<U, VoidHeader, VoidBody> {
     pub fn header<'a, V: fmt::Display>(
         self,
         name: &'a str,
         value: V,
-    ) -> RequestBuilder<Composite<H, HeaderWriter<'a, V>>, VoidBody> {
+    ) -> RequestBuilder<U, Composite<VoidHeader, HeaderWriter<'a, V>>, VoidBody> {
+        RequestBuilder {
+            method: self.method,
+            url: self.url,
+            version: self.version,
+            headers: Composite {
+                a: self.headers,
+                b: HeaderWriter { name, value },
+            },
+            body: self.body,
+        }
+    }
+}
+impl<U, H: CompositeWriter> RequestBuilder<U, H, VoidBody> {
+    pub fn header<'a, V: fmt::Display>(
+        self,
+        name: &'a str,
+        value: V,
+    ) -> RequestBuilder<U, Composite<H, HeaderWriter<'a, V>>, VoidBody> {
         RequestBuilder {
             method: self.method,
             url: self.url,
@@ -153,7 +194,7 @@ impl<H: RequestWriter> RequestBuilder<H, VoidBody> {
     pub fn body<'a>(
         self,
         body: &'a str,
-    ) -> RequestBuilder<Composite<H, HeaderWriter<'static, usize>>, BodyWriter<&'a str>> {
+    ) -> RequestBuilder<U, Composite<H, HeaderWriter<'static, usize>>, BodyWriter<&'a str>> {
         let s = self.header("Content-Length", body.len());
         RequestBuilder {
             method: s.method,
@@ -172,7 +213,8 @@ mod tests {
     #[test]
     fn test_request_builder() {
         let mut buf = [0u8; 128];
-        let n = RequestBuilder::new(Url::parse("rtsp://test.com").unwrap())
+        let n = RequestBuilder::new()
+            .url(&Url::parse("rtsp://test.com").unwrap())
             .method(Method::Describe)
             .version(Version::new(1, 0))
             .header("CSeq", 1)
@@ -188,7 +230,8 @@ mod tests {
     #[test]
     fn test_request_builder_insufficient_buffer() {
         let mut buf = [0u8; 10];
-        let n = RequestBuilder::new(Url::parse("rtsp://test.com").unwrap())
+        let n = RequestBuilder::new()
+            .url(&Url::parse("rtsp://test.com").unwrap())
             .method(Method::Describe)
             .version(Version::new(1, 0))
             .header("CSeq", 1)

@@ -4,14 +4,15 @@ use crate::rtsp::*;
 use rustls_pki_types::InvalidDnsNameError;
 use std::collections::HashMap;
 use std::vec;
-use thiserror::Error;
+use thiserror;
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
+use base64::prelude::*;
 
-#[derive(Debug, Error)]
-enum ClientError {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -34,13 +35,12 @@ enum ClientError {
     InvalidCSeq,
 }
 
-type Result<T> = std::result::Result<T, ClientError>;
+type Result<T> = std::result::Result<T, Error>;
 
 type CSeq = u32;
 
 pub struct Channel<Stream> {
     stream: Stream,
-    url: Url,
     cseq: CSeq,
     buffer_rx: Buffer,
     buffer_tx: Buffer,
@@ -53,10 +53,9 @@ pub struct Channel<Stream> {
 }
 
 impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stream> {
-    fn new(stream: Stream, url: Url, cmd_rx: mpsc::Receiver<Command>, packet_tx: mpsc::Sender<rtp::Packet>) -> Self {
+    pub fn new(stream: Stream, cmd_rx: mpsc::Receiver<Command>, packet_tx: mpsc::Sender<rtp::Packet>) -> Self {
         Self {
             stream,
-            url,
             cseq: 1,
             buffer_rx: Buffer::new(512 * 1024),
             buffer_tx: Buffer::new(512 * 1024),
@@ -78,7 +77,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
             match item {
                 ParseItem::Header(h) => {
                     if h.name.eq_ignore_ascii_case("cseq") {
-                        cseq = Some(h.value.parse().map_err(|_| ClientError::InvalidCSeq)?);
+                        cseq = Some(h.value.parse().map_err(|_| Error::InvalidCSeq)?);
                     } else {
                         headers.push(Header::new(h.name, h.value));
                     }
@@ -94,28 +93,23 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
         }
         if !parser.is_done() {
             let bytes = parser.missing_bytes().ok_or(if read_buf.len() > 1024 {
-                ClientError::HeaderTooLong
+                Error::HeaderTooLong
             } else {
-                ClientError::IncompleteResponse
+                Error::IncompleteResponse
             })?;
             if bytes > 32 * 1024 {
-                return Err(ClientError::RequestTooLong);
+                return Err(Error::RequestTooLong);
             } else {
-                return Err(ClientError::IncompleteResponse);
+                return Err(Error::IncompleteResponse);
             }
         }
-        let cseq = cseq.ok_or(ClientError::InvalidCSeq)?;
-        println!("cseq: {}", cseq);
-        for key in self.cmd_pending.keys() {
-            println!("key: {}", key);
-        }
-        let cmd = self.cmd_pending.remove(&cseq).ok_or(ClientError::InvalidCSeq)?;
+        let cseq = cseq.ok_or(Error::InvalidCSeq)?;
+        let cmd = self.cmd_pending.remove(&cseq).ok_or(Error::InvalidCSeq)?;
         if let Some(status) = status {
-            cmd.handle_response(status, &headers, body.ok_or(ClientError::IncompleteResponse)?);
+            cmd.handle_response(status, &headers, body.ok_or(Error::IncompleteResponse)?);
         } else {
             cmd.handle_error(CommandError::BadResponse);
         }
-        println!("Parsed {} bytes", parser.parsed_bytes());
         Ok(parser.parsed_bytes())
     }
 
@@ -146,11 +140,10 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
                     self.buffer_rx.notify_read(n);
                 }
                 Err(e) => match e {
-                    ClientError::IncompleteResponse => {
+                    Error::IncompleteResponse => {
                         break; // Simply retry later
                     }
                     _ => {
-                        println!("Error reading packet: {}, shutdown", e);
                         log::error!("Error reading packet: {}, shutdown", e);
                         self.shutdown();
                         break;
@@ -223,9 +216,14 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
     fn handle_command(&mut self, cmd: Command) {
         let cseq = self.next_cseq();
         let mut write_buf = self.buffer_tx.get_write_slice(4096).unwrap();
-        let builder = RequestBuilder::new(self.url.clone())
+        let user = "admin";
+        let pass = "Instar1!";
+        let auth = BASE64_STANDARD.encode(format!("{}:{}", user, pass).as_bytes());
+        let basic_auth = format!("Basic {}", auth);
+        let builder = RequestBuilder::new()
             .header("CSeq", cseq)
-            .header("User-Agent", "rs-streamer");
+            .header("User-Agent", "rs-streamer")
+            .header("Authorization", basic_auth);
         let n = cmd.write(builder, &mut write_buf).unwrap();
         self.buffer_tx.notify_write(n);
         self.cmd_pending.insert(cseq, cmd);
@@ -243,8 +241,6 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
     }
 }
 
-
-
 #[cfg(test)]
 use std::io::Write;
 #[tokio::test]
@@ -258,17 +254,18 @@ async fn test_channel() {
         let mut sstream = sstream;
         let mut read_buf = vec![0u8; 4096];
         let n = sstream.read(&mut read_buf).await.unwrap();
-        assert_eq!(&read_buf[..n], b"DESCRIBE rtsp://test.com RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: rs-streamer\r\n\r\n");
-
+        assert_eq!(
+            &read_buf[..n],
+            b"DESCRIBE rtsp://test.com RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: rs-streamer\r\n\r\n"
+        );
         let mut write_buf = Vec::<u8>::new();
         write!(write_buf, "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 4\r\n\r\ntest").unwrap();
         sstream.write_all(&write_buf).await.unwrap();
     });
-    let url = Url::parse("rtsp://test.com").unwrap();
-    let channel = Channel::new(cstream, url, cmd_rx, packet_tx);
+    let channel = Channel::new(cstream, cmd_rx, packet_tx);
     let handle = channel.start();
     let (tx, rx) = oneshot::channel();
-    let cmd = Command::Describe(Describe::new(tx));
+    let cmd = Command::Describe(Describe::new(Url::parse("rtsp://test.com").unwrap(), tx));
     cmd_tx.send(cmd).await.unwrap();
     let response = rx.await.unwrap().unwrap();
     handle.await.unwrap();

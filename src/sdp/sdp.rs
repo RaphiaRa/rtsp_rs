@@ -1,6 +1,7 @@
-use std::convert::TryFrom;
+use std::{convert::TryFrom};
 use thiserror::Error;
 
+#[derive(Error, Debug)]
 pub struct Sdp {
     description: String,
 }
@@ -18,5 +19,11 @@ impl TryFrom<&str> for Sdp {
         Ok(Sdp {
             description: value.to_string(),
         })
+    }
+}
+
+impl std::fmt::Display for Sdp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.description)
     }
 }
