@@ -1,5 +1,8 @@
+use super::*;
 use crate::rtsp::protocol::*;
 use crate::sdp;
+
+use std::fmt;
 
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -10,23 +13,40 @@ pub enum Error {
     ParseSdp(#[from] sdp::ParseError),
     #[error("Unexpected status code {0}")]
     UnexpectedStatus(Status),
+    #[error("Unauthorized")]
+    Unauthorized,
     #[error("Cancelled")]
     Cancelled,
     #[error("Bad response")]
     BadResponse,
+    #[error("Unknown error")]
+    Unknown,
 }
 
-type PreparedBuilder<H> = RequestBuilder<VoidUrl, H, VoidBody>;
-
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub trait PreparedBuilder {
+    fn get(self) -> RequestBuilder<NoUrl, impl fmt::Display, NoBody>;
+}
+
+impl<H: fmt::Display> PreparedBuilder for RequestBuilder<NoUrl, H, NoBody> {
+    fn get(self) -> RequestBuilder<NoUrl, impl fmt::Display, NoBody> {
+        self
+    }
+}
 pub struct Describe {
     url: url::Url,
     tx: oneshot::Sender<Result<sdp::Sdp>>,
 }
 
 impl Describe {
-    pub fn write(&self, builder: PreparedBuilder<impl CompositeWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
-        Ok(builder.method(Method::Describe).url(&self.url).write(buf)?)
+    pub fn write(
+        &self,
+        authorizer: &mut Authorizer,
+        builder: impl PreparedBuilder,
+        buf: &mut [u8],
+    ) -> std::io::Result<usize> {
+        Ok(authorizer.write(&self.url, builder.get().method(Method::Describe).url(&self.url), buf)?)
     }
 
     pub fn handle_response(self, status: Status, _headers: &[Header], body: &str) {
@@ -56,9 +76,14 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn write(&self, builder: PreparedBuilder<impl CompositeWriter>, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub fn write(
+        &self,
+        authorizer: &mut Authorizer,
+        builder: impl PreparedBuilder,
+        buf: &mut [u8],
+    ) -> std::io::Result<usize> {
         match self {
-            Command::Describe(describe) => describe.write(builder, buf),
+            Command::Describe(describe) => describe.write(authorizer, builder, buf),
         }
     }
 

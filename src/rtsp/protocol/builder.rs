@@ -3,33 +3,25 @@ use super::Version;
 use std::fmt;
 use std::io::Write;
 use url::Url;
+pub type Error = std::io::Error;
+pub type Result<T> = std::result::Result<T, Error>;
 
-pub type BuildError = std::io::Error;
-pub type Result<T> = std::result::Result<T, BuildError>;
+pub struct NoHeader {}
 
-pub trait RequestWriter {
-    fn write(&self, buf: &mut [u8]) -> Result<usize>;
-}
-
-pub struct VoidHeader {}
-
-impl RequestWriter for VoidHeader {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        write!(&mut buf[..], "\r\n")?;
-        Ok(2)
+impl fmt::Display for NoHeader {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Ok(())
     }
 }
 
-pub struct HeaderWriter<'a, V> {
+pub struct Header<'a, V> {
     name: &'a str,
     value: V,
 }
 
-impl<V: fmt::Display> RequestWriter for HeaderWriter<'_, V> {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut cursor = std::io::Cursor::new(buf);
-        write!(cursor, "{}: {}\r\n", self.name, self.value)?;
-        Ok(cursor.position() as usize)
+impl<V: fmt::Display> fmt::Display for Header<'_, V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}\r\n", self.name, self.value)
     }
 }
 
@@ -38,55 +30,26 @@ pub struct Composite<A, B> {
     b: B,
 }
 
-pub trait CompositeWriter {
-    fn write_composite(&self, buf: &mut [u8]) -> Result<usize>;
-}
-
-impl<B: RequestWriter> CompositeWriter for Composite<VoidHeader, B> {
-    fn write_composite(&self, buf: &mut [u8]) -> Result<usize> {
-        // ignore void header
-        Ok(self.b.write(&mut buf[..])?)
-    }
-}
-
-impl<A: CompositeWriter, B: RequestWriter> CompositeWriter for Composite<A, B> {
-    fn write_composite(&self, buf: &mut [u8]) -> Result<usize> {
-        let pos = self.a.write_composite(buf)?;
-        Ok(pos + self.b.write(&mut buf[pos..])?)
-    }
-}
-
-impl<A: CompositeWriter, B: RequestWriter> RequestWriter for Composite<A, B> {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        let pos = self.write_composite(buf)?;
-        Ok(pos + VoidHeader {}.write(&mut buf[pos..])?)
-    }
-}
-
-pub struct VoidBody {}
-
-impl RequestWriter for VoidBody {
-    fn write(&self, _buf: &mut [u8]) -> Result<usize> {
-        Ok(0)
-    }
-}
-pub struct BodyWriter<B> {
-    body: B,
-}
-
-impl<B: fmt::Display> RequestWriter for BodyWriter<B> {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut cursor = std::io::Cursor::new(buf);
-        write!(cursor, "{}", self.body)?;
-        Ok(cursor.position() as usize)
-    }
-}
-
-pub struct VoidUrl {}
-
-impl fmt::Display for VoidUrl {
+impl<A: fmt::Display, B: fmt::Display> fmt::Display for Composite<A, B> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "rtsp://")
+        write!(f, "{}{}", self.a, self.b)
+    }
+}
+
+pub struct NoBody {}
+
+impl fmt::Display for NoBody {
+    fn fmt(&self, _: &mut fmt::Formatter) -> fmt::Result {
+        Ok(())
+    }
+}
+
+pub struct NoUrl {}
+
+impl fmt::Display for NoUrl {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "rtsp://");
+        Ok(())
     }
 }
 
@@ -99,36 +62,24 @@ pub struct RequestBuilder<U, H, B> {
     body: B,
 }
 
-impl<U: fmt::Display, H: CompositeWriter, B: RequestWriter> RequestWriter for RequestBuilder<U, H, B> {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut cursor = std::io::Cursor::new(buf);
-        write!(cursor, "{} {} RTSP/{}\r\n", self.method, self.url, self.version)?;
-        let mut pos = cursor.position() as usize;
-        pos += self.headers.write_composite(&mut cursor.get_mut()[pos..])?;
-        pos += self.body.write(&mut cursor.get_mut()[pos..])?;
-        Ok(pos)
+impl<U: fmt::Display, H: fmt::Display, B: fmt::Display> fmt::Display for RequestBuilder<U, H, B> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} {} RTSP/{}\r\n{}\r\n{}",
+            self.method, self.url, self.version, self.headers, self.body
+        )
     }
 }
 
-impl<U: fmt::Display, B: RequestWriter> RequestWriter for RequestBuilder<U, VoidHeader, B> {
-    fn write(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut cursor = std::io::Cursor::new(buf);
-        write!(cursor, "{} {} RTSP/{}\r\n", self.method, self.url, self.version)?;
-        let mut pos = cursor.position() as usize;
-        pos += self.headers.write(&mut cursor.get_mut()[pos..])?;
-        pos += self.body.write(&mut cursor.get_mut()[pos..])?;
-        Ok(pos)
-    }
-}
-
-impl RequestBuilder<VoidUrl, VoidHeader, VoidBody> {
+impl RequestBuilder<NoUrl, NoHeader, NoBody> {
     pub fn new() -> Self {
         Self {
             method: Method::Options,
-            url: VoidUrl {},
+            url: NoUrl {},
             version: Version::new(1, 0),
-            headers: VoidHeader {},
-            body: VoidBody {},
+            headers: NoHeader {},
+            body: NoBody {},
         }
     }
 }
@@ -143,7 +94,7 @@ impl<U, H, B> RequestBuilder<U, H, B> {
     }
 }
 
-impl<H, B> RequestBuilder<VoidUrl, H, B> {
+impl<H, B> RequestBuilder<NoUrl, H, B> {
     pub fn url<'a>(self, url: &'a Url) -> RequestBuilder<&'a Url, H, B> {
         RequestBuilder {
             method: self.method,
@@ -155,54 +106,45 @@ impl<H, B> RequestBuilder<VoidUrl, H, B> {
     }
 }
 
-impl<U> RequestBuilder<U, VoidHeader, VoidBody> {
+impl<U, H> RequestBuilder<U, H, NoBody> {
     pub fn header<'a, V: fmt::Display>(
         self,
         name: &'a str,
         value: V,
-    ) -> RequestBuilder<U, Composite<VoidHeader, HeaderWriter<'a, V>>, VoidBody> {
+    ) -> RequestBuilder<U, Composite<H, Header<'a, V>>, NoBody> {
         RequestBuilder {
             method: self.method,
             url: self.url,
             version: self.version,
             headers: Composite {
                 a: self.headers,
-                b: HeaderWriter { name, value },
-            },
-            body: self.body,
-        }
-    }
-}
-impl<U, H: CompositeWriter> RequestBuilder<U, H, VoidBody> {
-    pub fn header<'a, V: fmt::Display>(
-        self,
-        name: &'a str,
-        value: V,
-    ) -> RequestBuilder<U, Composite<H, HeaderWriter<'a, V>>, VoidBody> {
-        RequestBuilder {
-            method: self.method,
-            url: self.url,
-            version: self.version,
-            headers: Composite {
-                a: self.headers,
-                b: HeaderWriter { name, value },
+                b: Header { name, value },
             },
             body: self.body,
         }
     }
 
-    pub fn body<'a>(
-        self,
-        body: &'a str,
-    ) -> RequestBuilder<U, Composite<H, HeaderWriter<'static, usize>>, BodyWriter<&'a str>> {
-        let s = self.header("Content-Length", body.len());
+    pub fn body<'a>(self, body: &'a str) -> RequestBuilder<U, Composite<H, Header<'static, usize>>, &'a str> {
+        let builder = self.header("Content-Length", body.len());
         RequestBuilder {
-            method: s.method,
-            url: s.url,
-            version: s.version,
-            headers: s.headers,
-            body: BodyWriter { body },
+            method: builder.method,
+            url: builder.url,
+            version: builder.version,
+            headers: builder.headers,
+            body,
         }
+    }
+}
+
+pub trait Serialize {
+    fn serialize(&self, buf: &mut [u8]) -> Result<usize>;
+}
+
+impl<T: fmt::Display> Serialize for T {
+    fn serialize(&self, buf: &mut [u8]) -> Result<usize> {
+        let mut cursor = std::io::Cursor::new(buf);
+        write!(cursor, "{}", self)?;
+        Ok(cursor.position() as usize)
     }
 }
 
@@ -220,7 +162,7 @@ mod tests {
             .header("CSeq", 1)
             .header("User-Agent", "test")
             .body("test")
-            .write(&mut buf)
+            .serialize(&mut buf)
             .unwrap();
         assert_eq!(
             std::str::from_utf8(&buf[..n]).unwrap(),
@@ -237,7 +179,7 @@ mod tests {
             .header("CSeq", 1)
             .header("User-Agent", "test")
             .body("test")
-            .write(&mut buf);
+            .serialize(&mut buf);
         assert!(n.is_err());
     }
 }
