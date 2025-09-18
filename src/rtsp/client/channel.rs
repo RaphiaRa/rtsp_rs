@@ -65,7 +65,7 @@ pub struct Channel<Stream> {
     cmd_rx: mpsc::Receiver<Command>,
     cmd_pending: HashMap<CSeq, Command>,
     cmd_retry: VecDeque<Command>,
-    authorizer: Authorizer,
+    authorizer: Option<Authorizer>,
     user: Option<String>,
     pass: String,
     // For sending processed packets to the client
@@ -83,7 +83,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
             cmd_rx,
             cmd_pending: HashMap::new(),
             cmd_retry: VecDeque::new(),
-            authorizer: Authorizer::default(),
+            authorizer: None,
             user: None,
             pass: String::new(),
             packet_tx,
@@ -122,9 +122,9 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
         while let Some(item) = parser.parse_next(read_buf)? {
             match item {
                 ParseItem::Header(h) => {
-                    if cseq.is_none() && h.name.eq_ignore_ascii_case("cseq") {
+                    if h.name.eq_ignore_ascii_case("cseq") {
                         cseq = Some(h.value.parse().map_err(|_| Error::InvalidCSeq)?);
-                    } else if www_authenticate.is_none() && h.name.eq_ignore_ascii_case("www-authenticate") {
+                    } else if h.name.eq_ignore_ascii_case("www-authenticate") {
                         www_authenticate = Some(h.value);
                     } else {
                         headers.push(Header::new(h.name, h.value));
@@ -159,19 +159,19 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
                     let result = Self::create_authorizer(&self.user, &self.pass, www_authenticate);
                     match result {
                         Ok(authorizer) => {
-                            self.authorizer = authorizer;
+                            self.authorizer = Some(authorizer);
                             self.cmd_retry.push_back(cmd);
                         }
-                        Err(e) => cmd.handle_error(e.into()),
+                        Err(e) => cmd.cancel(e.into()),
                     }
                 }
                 Status::OK => {
                     cmd.handle_response(status, &headers, body.ok_or(Error::BadResponse)?);
                 }
-                _ => cmd.handle_error(CommandError::UnexpectedStatus(status)),
+                _ => cmd.cancel(CommandError::UnexpectedStatus(status)),
             }
         } else {
-            cmd.handle_error(CommandError::BadResponse);
+            cmd.cancel(CommandError::BadResponse);
         }
         Ok(parser.parsed_bytes())
     }
@@ -219,7 +219,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
     fn shutdown(&mut self) {
         self.shutdown = true;
         for (_, cmd) in self.cmd_pending.drain() {
-            cmd.handle_error(CommandError::Cancelled);
+            cmd.cancel(CommandError::Cancelled);
         }
     }
 
@@ -287,10 +287,25 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
         let mut write_buf = self.buffer_tx.get_write_slice(4096).unwrap();
         let builder = RequestBuilder::new()
             .header("CSeq", cseq)
-            .header("User-Agent", "rs-streamer");
-        let n = cmd.write(&mut self.authorizer, builder, &mut write_buf).unwrap();
-        self.buffer_tx.notify_write(n);
-        self.cmd_pending.insert(cseq, cmd);
+            .header("User-Agent", "rs-streamer")
+            .opt_header(
+                "Authorization",
+                self.authorizer
+                    .as_mut()
+                    .and_then(|a| a.answer(cmd.method(), cmd.url()).ok()),
+            )
+            .method(cmd.method())
+            .url(cmd.url());
+        match builder.serialize(&mut write_buf) {
+            Ok(n) => {
+                self.buffer_tx.notify_write(n);
+                self.cmd_pending.insert(cseq, cmd);
+            }
+            Err(_) => {
+                cmd.cancel(CommandError::Unknown);
+                return;
+            }
+        }
     }
 
     async fn run(mut self) {

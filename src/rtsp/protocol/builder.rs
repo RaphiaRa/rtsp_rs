@@ -16,12 +16,15 @@ impl fmt::Display for NoHeader {
 
 pub struct Header<'a, V> {
     name: &'a str,
-    value: V,
+    value: Option<V>,
 }
 
 impl<V: fmt::Display> fmt::Display for Header<'_, V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {}\r\n", self.name, self.value)
+        match &self.value {
+            None => Ok(()),
+            Some(value) => write!(f, "{}: {}\r\n", self.name, value),
+        }
     }
 }
 
@@ -118,9 +121,33 @@ impl<U, H> RequestBuilder<U, H, NoBody> {
             version: self.version,
             headers: Composite {
                 a: self.headers,
-                b: Header { name, value },
+                b: Header {
+                    name,
+                    value: Some(value),
+                },
             },
             body: self.body,
+        }
+    }
+
+    pub fn opt_header<'a, V: fmt::Display>(
+        self,
+        name: &'a str,
+        value: Option<V>,
+    ) -> RequestBuilder<U, Composite<H, Header<'a, V>>, NoBody> {
+        if let Some(value) = value {
+            self.header(name, value)
+        } else {
+            RequestBuilder {
+                method: self.method,
+                url: self.url,
+                version: self.version,
+                headers: Composite {
+                    a: self.headers,
+                    b: Header { name, value: None },
+                },
+                body: self.body,
+            }
         }
     }
 

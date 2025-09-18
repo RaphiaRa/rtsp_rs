@@ -5,7 +5,7 @@ use std::str::FromStr;
 use thiserror::Error;
 
 /// RTSP Status codes
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
     Continue = 100,
     OK = 200,
@@ -70,8 +70,6 @@ impl fmt::Display for InvalidStatusError {
     }
 }
 
-
-
 impl TryFrom<u32> for Status {
     type Error = InvalidStatusError;
     fn try_from(value: u32) -> Result<Self, Self::Error> {
@@ -125,8 +123,15 @@ impl TryFrom<u32> for Status {
     }
 }
 
+impl From<Status> for u32 {
+    fn from(value: Status) -> Self {
+        value as u32
+    }
+}
+
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} ", u32::from(*self))?;
         match self {
             Status::Continue => write!(f, "Continue"),
             Status::OK => write!(f, "OK"),
@@ -142,7 +147,7 @@ impl fmt::Display for Status {
             Status::Unauthorized => write!(f, "Unauthorized"),
             Status::PaymentRequired => write!(f, "Payment Required"),
             Status::Forbidden => write!(f, "Forbidden"),
-            Status::NotFound => write!(f, "Not Found"),
+            Status::NotFound => write!(f, "Stream Not Found"),
             Status::MethodNotAllowed => write!(f, "Method Not Allowed"),
             Status::NotAcceptable => write!(f, "Not Acceptable"),
             Status::ProxyAuthenticationRequired => write!(f, "Proxy Authentication Required"),

@@ -25,7 +25,7 @@ impl Buffer {
         }
     }
 
-    pub fn get_read_slice(&mut self) -> &[u8] {
+    pub fn get_read_slice(&self) -> &[u8] {
         let slice = &self.data[self.read_pos..self.write_pos];
         slice
     }
@@ -66,19 +66,19 @@ mod tests {
     #[test]
     fn test_buffer() {
         let mut buffer = Buffer::new(10);
-            let slice = buffer.get_write_slice(5).unwrap();
-            slice.copy_from_slice(&[1, 2, 3, 4, 5]);
-            buffer.notify_write(5);
-            let slice = buffer.get_write_slice(5).unwrap();
-            slice.copy_from_slice(&[6, 7, 8, 9, 10]);
-            buffer.notify_write(5);
-            let slice = buffer.get_read_slice();
-            assert_eq!(slice, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-            buffer.notify_read(10);
-            let slice = buffer.get_write_slice(5).unwrap();
-            slice[..5].copy_from_slice(&[11, 12, 13, 14, 15]);
-            buffer.notify_write(5);
-            let slice = buffer.get_read_slice();
-            assert_eq!(slice, &[11, 12, 13, 14, 15]);
+        let slice = buffer.get_write_slice(5).unwrap();
+        slice.copy_from_slice(&[1, 2, 3, 4, 5]);
+        buffer.notify_write(5);
+        let slice = buffer.get_write_slice(5).unwrap();
+        slice.copy_from_slice(&[6, 7, 8, 9, 10]);
+        buffer.notify_write(5);
+        let slice = buffer.get_read_slice();
+        assert_eq!(slice, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        buffer.notify_read(10);
+        let slice = buffer.get_write_slice(5).unwrap();
+        slice[..5].copy_from_slice(&[11, 12, 13, 14, 15]);
+        buffer.notify_write(5);
+        let slice = buffer.get_read_slice();
+        assert_eq!(slice, &[11, 12, 13, 14, 15]);
     }
 }

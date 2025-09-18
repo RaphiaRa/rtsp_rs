@@ -4,3 +4,5 @@ struct RtpMap {
     codec: String,
     timebase: u32,
 }
+
+struct Fmtp {}
