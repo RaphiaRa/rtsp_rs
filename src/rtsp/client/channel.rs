@@ -63,8 +63,8 @@ pub struct Channel<Stream> {
     buffer_rx: Buffer,
     buffer_tx: Buffer,
     cmd_rx: mpsc::Receiver<Command>,
-    cmd_pending: HashMap<CSeq, Command>,
-    cmd_retry: VecDeque<Command>,
+    req_pending: HashMap<CSeq, Request>,
+    req_retry: VecDeque<Request>,
     authorizer: Option<Authorizer>,
     user: Option<String>,
     pass: String,
@@ -81,8 +81,8 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
             buffer_rx: Buffer::new(512 * 1024),
             buffer_tx: Buffer::new(512 * 1024),
             cmd_rx,
-            cmd_pending: HashMap::new(),
-            cmd_retry: VecDeque::new(),
+            req_pending: HashMap::new(),
+            req_retry: VecDeque::new(),
             authorizer: None,
             user: None,
             pass: String::new(),
@@ -152,7 +152,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
             }
         }
         let cseq = cseq.ok_or(Error::InvalidCSeq)?;
-        let cmd = self.cmd_pending.remove(&cseq).ok_or(Error::InvalidCSeq)?;
+        let cmd = self.req_pending.remove(&cseq).ok_or(Error::InvalidCSeq)?;
         if let Some(status) = status {
             match status {
                 Status::Unauthorized => {
@@ -160,7 +160,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
                     match result {
                         Ok(authorizer) => {
                             self.authorizer = Some(authorizer);
-                            self.cmd_retry.push_back(cmd);
+                            self.req_retry.push_back(cmd);
                         }
                         Err(e) => cmd.cancel(e.into()),
                     }
@@ -218,7 +218,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
 
     fn shutdown(&mut self) {
         self.shutdown = true;
-        for (_, cmd) in self.cmd_pending.drain() {
+        for (_, cmd) in self.req_pending.drain() {
             cmd.cancel(CommandError::Cancelled);
         }
     }
@@ -240,15 +240,15 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
         Ok(())
     }
 
-    fn handle_retry_cmds(&mut self) {
-        while let Some(cmd) = self.cmd_retry.pop_front() {
-            self.handle_command(cmd);
+    fn handle_retry_req(&mut self) {
+        while let Some(req) = self.req_retry.pop_front() {
+            self.handle_request(req);
         }
     }
 
     async fn poll_until_shutdown(&mut self) -> Result<()> {
         while !self.shutdown {
-            self.handle_retry_cmds();
+            self.handle_retry_req();
             self.send_outstanding_data().await?;
             let mut read_buf = self.buffer_rx.get_write_slice(4096).unwrap();
             tokio::select! {
@@ -282,7 +282,7 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
         cseq
     }
 
-    fn handle_command(&mut self, cmd: Command) {
+    fn handle_request(&mut self, req: Request) {
         let cseq = self.next_cseq();
         let mut write_buf = self.buffer_tx.get_write_slice(4096).unwrap();
         let builder = RequestBuilder::new()
@@ -292,19 +292,32 @@ impl<Stream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static> Channel<Stre
                 "Authorization",
                 self.authorizer
                     .as_mut()
-                    .and_then(|a| a.answer(cmd.method(), cmd.url()).ok()),
+                    .and_then(|a| a.answer(req.method(), req.url()).ok()),
             )
-            .method(cmd.method())
-            .url(cmd.url());
+            .method(req.method())
+            .url(req.url());
         match builder.serialize(&mut write_buf) {
             Ok(n) => {
                 self.buffer_tx.notify_write(n);
-                self.cmd_pending.insert(cseq, cmd);
+                self.req_pending.insert(cseq, req);
             }
             Err(_) => {
-                cmd.cancel(CommandError::Unknown);
+                req.cancel(CommandError::Unknown);
                 return;
             }
+        }
+    }
+
+    fn handle_ctrl(&mut self, ctrl: Ctrl) {
+        match ctrl {
+            Ctrl::Shutdown => self.shutdown(),
+        }
+    }
+
+    fn handle_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::Request(req) => self.handle_request(req),
+            Command::Ctrl(ctrl) => self.handle_ctrl(ctrl),
         }
     }
 
@@ -344,7 +357,10 @@ async fn test_channel() {
     let channel = Channel::new(cstream, cmd_rx, packet_tx);
     let handle = channel.start();
     let (tx, rx) = oneshot::channel();
-    let cmd = Command::Describe(Describe::new(Url::parse("rtsp://test.com").unwrap(), tx));
+    let cmd = Command::Request(Request::Describe(Describe::new(
+        Url::parse("rtsp://test.com").unwrap(),
+        tx,
+    )));
     cmd_tx.send(cmd).await.unwrap();
     let response = rx.await.unwrap().unwrap();
     handle.await.unwrap();

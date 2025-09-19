@@ -19,7 +19,7 @@ async fn main() {
     let handle = channel.start();
     let (tx, rx) = oneshot::channel::<rtsp::client::CommandResult<sdp::Sdp>>();
     let describe = rtsp::client::Describe::new(url::Url::parse(&format!("rtsp://{}/livestream/11", host)).unwrap(), tx);
-    let cmd = rtsp::client::Command::Describe(describe);
+    let cmd = rtsp::client::Command::Request(rtsp::client::Request::Describe(describe));
     cmd_tx.send(cmd).await.unwrap();
     let result = rx.await.unwrap();
     match result {
@@ -30,5 +30,6 @@ async fn main() {
             eprintln!("Error: {}", e);
         }
     }
+    cmd_tx.send(rtsp::client::Command::Ctrl(rtsp::client::Ctrl::Shutdown)).await.unwrap();
     handle.await.unwrap();
 }

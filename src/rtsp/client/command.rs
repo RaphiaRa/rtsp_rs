@@ -53,40 +53,47 @@ impl Describe {
     pub fn cancel(self, e: Error) {
         let _ = self.tx.send(Err(e));
     }
-}
 
-impl Describe {
     pub fn new(url: url::Url, tx: oneshot::Sender<Result<sdp::Sdp>>) -> Self {
         Self { url, tx }
     }
 }
 
-pub enum Command {
+pub enum Request {
     Describe(Describe),
 }
 
-impl Command {
+impl Request {
     pub fn handle_response(self, status: Status, headers: &[Header], body: &str) {
         match self {
-            Command::Describe(describe) => describe.handle_response(status, headers, body),
+            Request::Describe(describe) => describe.handle_response(status, headers, body),
         }
     }
 
     pub fn cancel(self, e: Error) {
         match self {
-            Command::Describe(describe) => describe.cancel(e),
+            Request::Describe(describe) => describe.cancel(e),
         }
     }
 
     pub fn url(&self) -> &url::Url {
         match self {
-            Command::Describe(describe) => describe.url(),
+            Request::Describe(describe) => describe.url(),
         }
     }
 
     pub fn method(&self) -> Method {
         match self {
-            Command::Describe(describe) => describe.method(),
+            Request::Describe(describe) => describe.method(),
         }
     }
+}
+
+pub enum Ctrl {
+    Shutdown,
+}
+
+pub enum Command {
+    Request(Request),
+    Ctrl(Ctrl),
 }
